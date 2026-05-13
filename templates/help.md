@@ -4,9 +4,21 @@ Sets up an unattended autonomous `/loop` run on Claude Code's native `/loop` pri
 
 ## When to use
 
-- You're leaving Claude Code unattended (overnight, day-trip, multi-hour block)
-- You have a plan / track / spike to execute
-- The work involves real engineering output (commits, PRs, issue closures), not just chat
+You should be at the **execution** end of a deliberate pipeline — the upstream thinking is done:
+
+- ✓ Design document (multi-round design, e.g. via `brainstorming`) — committed
+- ✓ Architecture review settled (e.g. architecture-critic + `/review`) — "do not re-litigate" recorded
+- ✓ Plan written (e.g. via `writing-plans`) — phased, with dependencies + scope carve-outs
+- ✓ Issues filed (umbrella + children) in your tracker — GitHub / Linear / etc.
+- ✓ Docs committed; issues link to them
+
+Then this skill executes the plan unattended:
+
+- You're leaving Claude Code (overnight, day-trip, multi-hour block)
+- The work involves real engineering output (commits, PRs, issue closures), not chat
+- You want continuity across tasks (state, in-flight PRs, mid-flight redirect via the brief)
+
+**Don't use** if the design / plan / tracking isn't in place — invoke this skill on half-baked input and you'll get half-baked output at scale.
 
 ## Invocation
 
