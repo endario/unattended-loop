@@ -4,6 +4,38 @@ A [Claude Code](https://claude.com/claude-code) skill for running Claude unatten
 
 Wraps Claude Code's native `/loop` primitive with a 4-file harness and a baked-in engineering playbook (TDD, `/review` on meaningful PRs, PR-first workflow, 3-strike failure budget, no-stop policy) so you don't retype your standards every session. You drop the harness, brief the goal, walk away. Claude executes — and if you change your mind mid-flight, you edit a single file (`loop-brief.md`) and the next tick picks it up.
 
+## TL;DR — when to invoke this skill
+
+This skill is the **executor** at the tail end of a deliberate engineering pipeline. It assumes the upstream thinking is already done. If you invoke it on half-baked input, you'll get half-baked output at scale.
+
+**Recommended pipeline** (each step is a separate, finished activity before the next begins):
+
+| # | Step | Skill / activity | What you leave behind |
+|---|---|---|---|
+| 1 | **Design** | [`brainstorming`](https://github.com/obra/superpowers/tree/main/skills/brainstorming) — explore intent, requirements, shape of the solution across multiple rounds | A comprehensive design document, committed |
+| 2 | **Architecture review** | An architecture-critic agent (if your project ships one) + the `/review` skill on the design itself | Settled architectural decisions; a "do not re-litigate" set recorded in the design doc |
+| 3 | **Plan** | [`writing-plans`](https://github.com/obra/superpowers/tree/main/skills/writing-plans) — convert the design into an executable plan; iterate with review | Phased plan with explicit dependencies, scope carve-outs, and definition-of-done per phase |
+| 4 | **Track** | File the umbrella issue + per-phase / per-task child issues in your tracker (GitHub Issues, Linear, JIRA, etc.) | A clean issue graph the loop can advance against, with `Ref:` / `Fixes:` IDs |
+| 5 | **Commit upstream artifacts** | Push the design doc, plan, and any reference material to git | All planning artefacts in version control, referenced from issues |
+
+**Then — and only then:**
+
+```
+/unattended-loop
+```
+
+The skill scans recent conversation context (design doc, plan, open issues, recent submodule activity), drafts a `loop-brief.md`, runs a pre-flight checklist, and hands you the trigger to fire. You walk away. Claude executes the plan against the tracked issues: TDD where applicable, PRs for every change, `/review` on meaningful ones, follow-up issues filed on findings, stops at the Definition of Done.
+
+### Don't invoke this skill if…
+
+| Symptom | What to do instead |
+|---|---|
+| The design isn't settled — open questions remain | Run [`brainstorming`](https://github.com/obra/superpowers/tree/main/skills/brainstorming) first |
+| The plan doesn't exist yet | Run [`writing-plans`](https://github.com/obra/superpowers/tree/main/skills/writing-plans) first |
+| The work isn't tracked anywhere | File the umbrella + child issues first |
+| You want Claude to plan AND execute in one pass | Consider [`subagent-driven-development`](https://github.com/obra/superpowers/tree/main/skills/subagent-driven-development) — it's a different model where each task gets a fresh subagent. This skill prefers continuity (state across tasks, in-flight PRs to watch, mid-flight redirect via the brief). |
+| The task fits in one session anyway | You don't need this skill — just work directly. The overhead only pays off for multi-hour autonomous runs. |
+
 ## What it does
 
 When invoked, the skill drops 4 files into `<your-repo>/.claude/`:
