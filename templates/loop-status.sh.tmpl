@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Status snapshot for the unattended /loop. Run on every tick BEFORE deciding the
+# next action. Do not infer state — observe it. Output is plain text, designed to
+# be readable both by you and by tail/grep.
+
+set -u
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$repo_root" ]; then
+  echo "ERROR: not inside a git repo. Run this from the project root."
+  exit 1
+fi
+cd "$repo_root"
+
+now="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "=== loop-status @ $now ==="
+echo
+
+echo "=== Parent repo ($(basename "$repo_root")) ==="
+echo "Branch: $(git branch --show-current)"
+echo "Working tree:"
+git status --short | head -20
+echo "Recent commits:"
+git log --oneline -10
+echo
+
+if [ -f .gitmodules ]; then
+  echo "=== Submodule status ==="
+  git submodule foreach --quiet '
+    branch=$(git branch --show-current 2>/dev/null || echo "(detached)")
+    short=$(git log -1 --oneline 2>/dev/null)
+    dirty=""
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then dirty=" [dirty]"; fi
+    printf "%-20s %-15s %s%s\n" "$name" "$branch" "$short" "$dirty"
+  '
+  echo
+fi
+
+echo "=== Open PRs in affected repos ==="
+# Prefer the canonical "Affected repos:" line in the brief; fall back to whole-brief scan.
+repos=$(sed -n 's/^- Affected repos:[[:space:]]*//p' .claude/loop-brief.md 2>/dev/null \
+  | tr ',;' '\n' \
+  | grep -oE '[a-zA-Z0-9][a-zA-Z0-9-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*' \
+  | sort -u)
+if [ -z "$repos" ]; then
+  repos=$(grep -oE '\b[a-zA-Z0-9][a-zA-Z0-9-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*\b' .claude/loop-brief.md 2>/dev/null \
+    | grep -vE '\.(md|sh|yml|yaml|json|kt|ts|tsx|js|py|toml|lock)$' \
+    | sort -u)
+fi
+if [ -z "$repos" ]; then
+  # Final fallback: current repo's GitHub origin.
+  origin=$(git remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')
+  repos="$origin"
+fi
+for repo in $repos; do
+  echo "-- $repo --"
+  gh pr list -R "$repo" --state open \
+    --json number,title,mergeStateStatus,statusCheckRollup,headRefOid \
+    --jq '.[] |
+      "#\(.number) \(.title) — \(.mergeStateStatus) — head=\(.headRefOid[0:8]) — failing=\([.statusCheckRollup[]? | select(.conclusion=="FAILURE") | (.name // .context // "?")] | join(",") | if . == "" then "0" else . end)"' \
+    2>/dev/null || echo "(gh failed for $repo)"
+done
+echo
+
+echo "=== Progress log tail (last 25 lines) ==="
+if [ -f .claude/loop-progress.md ]; then
+  tail -25 .claude/loop-progress.md
+else
+  echo "(loop-progress.md not found — this looks like the first tick)"
+fi
+echo
+
+echo "=== Brief sanity ==="
+if [ ! -f .claude/loop-brief.md ] || [ ! -s .claude/loop-brief.md ]; then
+  echo "WARNING: loop-brief.md is missing or empty. Per loop.md, end the loop."
+else
+  echo "Goal line: $(grep -A1 '^## Goal' .claude/loop-brief.md | tail -1 | cut -c1-100)"
+  echo "DoD line:  $(grep -A1 '^## Definition of done' .claude/loop-brief.md | tail -1 | cut -c1-100)"
+fi

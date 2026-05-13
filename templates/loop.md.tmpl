@@ -1,0 +1,197 @@
+# Unattended /loop — autonomous execution
+
+You are running an unattended autonomous loop. The user is not present and will not steer mid-execution. **Do not stop, do not ping, do not wait** unless you hit a genuine blocker per the "When to ping" section below. Decide, document, move on.
+
+This file is the **directive** — rules + recipe. It does not change per session.
+The **session-specific** goal lives in `.claude/loop-brief.md` — read it on every tick; the user may edit it between fires to redirect you.
+
+If `.claude/loop-brief.md` is missing or empty, end the loop immediately (write a "Final state" note to `.claude/loop-progress.md` and omit `ScheduleWakeup`).
+
+## Per-tick recipe — run these in order, every tick
+
+### 1. Read the brief
+
+```bash
+cat .claude/loop-brief.md
+```
+
+This is the source of truth for **what** you're doing. Goal, plan/track pointers, definition of done, scope-of-autonomy carve-outs.
+
+### 2. Observe state — don't infer
+
+```bash
+bash .claude/loop-status.sh
+```
+
+Output: parent + submodule branches, recent commits, open PRs across affected repos with merge-state, tail of progress log. **Read this before deciding the next action.** Do not restart from step 1 of the plan if step 1 already shipped — the status script tells you what shipped.
+
+**Throttle**: run `loop-status.sh` once per tick, not in tight inner sub-loops. It executes multiple `gh` API calls — fine per tick, but spamming it (e.g. polling a single PR every 30s by re-running it) burns GitHub API rate budget unnecessarily. For watching a single in-flight PR, use the watcher pattern from `CLAUDE.md` §Watching auto-merged PRs (~120s interval, log only on state transitions).
+
+### 3. Advance one task
+
+Combining the brief + status, pick the next concrete task and execute it. The rules below are not optional — they apply to every task.
+
+### 4. Append to the progress log
+
+After each meaningful step (test failing, test passing, PR opened, PR merged, phase complete, blocker filed), append one line to `.claude/loop-progress.md`:
+
+```
+- YYYY-MM-DD HH:MM — <what shipped or happened> — <link to PR / commit / issue>
+```
+
+**For the timestamp, use the value from `loop-status.sh`'s `=== loop-status @ <ts> ===` header — do NOT guess.** Training-data cached date strings drift; the status script's `date` output is the only authoritative source. If you haven't run the status script this tick, run `date '+%Y-%m-%d %H:%M:%S %Z'` directly before appending. Loops have written dates one or more days off when this was inferred rather than read.
+
+Use the `Edit` tool (append to the `## Progress` section). The status script tails this on every tick.
+
+### 5. Schedule the next tick
+
+Call `ScheduleWakeup` with delay matched to what you're waiting for (see "Pacing matrix"). Pass the literal sentinel `<<loop.md-dynamic>>` as the `prompt` — **exactly that, character-for-character**.
+
+**DO NOT paraphrase the sentinel.** Each of the following queues a wakeup that the runtime cannot resolve into a usable form, so the next tick never fires and the loop dies invisibly. The `ScheduleWakeup` response will say `"Next wakeup scheduled for ..."` either way — failure is silent until you (or the user) notice no progress:
+
+- `prompt: "/loop"` — bare `/loop` prints usage text, no dynamic mode.
+- `prompt: "/loop follow .claude/loop.md"` — `/loop` has no `follow` subcommand. **(Real-world failure mode: an entire session's worth of wakeups silently never fired.)**
+- `prompt: "/loop <<loop.md-dynamic>>"` — that's the user's setup-time invocation form, not the wakeup form. The wakeup form is the bare sentinel.
+- `prompt: "<<autonomous-loop-dynamic>>"` — different sentinel, for the autonomous-loop mode that does NOT read `.claude/loop.md`. Don't confuse them.
+
+The only correct value: `prompt: "<<loop.md-dynamic>>"`. If in doubt, copy from this paragraph rather than retyping.
+
+If you ever notice the previous `ScheduleWakeup` returned successfully but the next tick never came, check the `prompt` argument you passed in your transcript — that's almost always the cause.
+
+To end the loop intentionally: write a "## Final state" section to `.claude/loop-progress.md` and omit `ScheduleWakeup`.
+
+## Rules — not optional
+
+Before applying any rule below, **check `## Scope of autonomy → Playbook overrides` in the brief** (you already read the brief in step 1 of the per-tick recipe). Rules listed there as "OFF" — or with explicit modifications — are honored over the defaults below. If the section reads `(none …)` or is empty, every rule below is active as written.
+
+The **always-on** set is not overridable regardless of brief contents: no `--no-verify`, no signing bypass, hook discipline, don't re-litigate locked decisions, keep docs in sync with code. Those stay on.
+
+### TDD discipline
+
+Logic changes follow failing-test → minimal impl → green → commit. Show the failing test output in the commit body or in the progress log line — it must be auditable. See the repo's `CLAUDE.md` §Tests before commit for what counts as "logic" vs trivial.
+
+### Self-test before opening the PR
+
+Run the project's test command for the affected module before `gh pr create`. Do not open PRs with locally-failing tests "to let CI catch it." For UI changes, run the project's e2e harness if it has one (often documented in the project's `CLAUDE.md`).
+
+### Local-ops greenlight
+
+You have permission to start / stop / restart the project's local services, and to `docker compose up/down/restart` development containers. Before killing a service, self-check via `lsof -nPi tcp:<port> -sTCP:LISTEN -t` + `ps -p <PID> -o command=` so you don't disrupt an IDE-attached process the user left running (debugger state, hot-reload, terminal output). The user is away — you are the user-equivalent for this session; do not ping for local-ops permission.
+
+### /review judiciously, on meaningful PRs
+
+After CI goes green on the PR, invoke the `/review` skill via the `Skill` tool **for PRs that introduce logic, new APIs, security surfaces, schema changes, or material refactors**. Skip `/review` for: doc-only PRs, dependency bumps, pure config diffs, mechanical pointer bumps, trivial corrections — those get a self-check pass instead.
+
+When you do invoke it: address review findings in the same PR before merge. Never merge with unresolved review comments. The reviewer has historically caught issues that CI doesn't — treat its findings as load-bearing. But don't dilute that signal by invoking it on chore commits.
+
+### Failure budget — 3-strike rule
+
+If the same failure recurs (same test red, same CI check failing, same exception, same diagnostic dead-end), allow up to **3 attempts at a real fix**. After the 3rd attempt with no real progress:
+
+1. File an issue with full repro details, what you tried, and why each attempt failed.
+2. Mark the affected task `blocked:` in `.claude/loop-progress.md`.
+3. **Move to the next independent task**. Do not keep retrying the same approach.
+
+A "real attempt" is a code change + test run, not just re-triggering CI on the same diff. Three real attempts is your budget — after that you're spinning, not progressing.
+
+### PR-first
+
+Every change via branch → PR → squash-merge per `CLAUDE.md` §Workflow: PR-first. Direct-push to main only for the allowlisted cases (release commits, mechanical pointer bumps, emergencies). Auto-merge:
+
+```bash
+gh pr merge --auto --squash --delete-branch
+```
+
+For PRs you auto-merged, run the watcher pattern from `CLAUDE.md` §Watching auto-merged PRs — `BEHIND` / `DIRTY` / `BLOCKED` states need remediation, not just polling for `MERGED`.
+
+### Submodule + parent pointer-bump hygiene
+
+After a submodule PR merges, fast-forward the submodule's local `main` and bump the parent pointer per `CLAUDE.md` §Pointer-bump pattern. The parent-branch guard (`git -C <parent> branch --show-current` must equal `main` before staging) is mandatory — session-start branch state can drift.
+
+### Docs kept pristine
+
+After each phase / major milestone, update the canonical plan / design docs to reflect what was found, learned, changed. The doc is the durable artefact; the code is the ephemeral one. If the spike surfaced a design correction, update the design doc in the same PR.
+
+### Don't re-litigate locked decisions
+
+Architectural decisions locked in the design doc or in prior memory entries are not reopened during an unattended session. If you find something that looks wrong, file an issue documenting the concern and continue with the documented approach.
+
+### Hooks, signing, no --no-verify
+
+Never `git commit --no-verify` or `git push --no-verify`. Never disable commit signing. If a pre-commit hook fails, fix the underlying issue and create a NEW commit — never `--amend` past a failed hook (the commit didn't happen, so `--amend` would corrupt the previous one).
+
+## Pacing matrix (ScheduleWakeup delays)
+
+| What you're waiting for | `delaySeconds` |
+|---|---|
+| Docker compose startup, service warmup | 60–270 |
+| CI on a PR — one re-check (cache window) | 270 |
+| Long CI build (10+ min expected) | 1200 |
+| Mid-task with work to do right now | NO sleep — keep working in the foreground |
+| Just shipped a phase, ready to start next | 60 |
+| Idle, watching for a slow external signal | 1200–1800 |
+| Genuinely idle, no specific signal | 1800 |
+
+Always pass `<<loop.md-dynamic>>` as `prompt`. Picking 300s is a trap — it pays the cache miss without amortising it; choose 270 or ≥1200.
+
+## When to ping (very rare)
+
+Use `PushNotification` only when:
+
+1. A scope/direction decision needs the user before you commit to it (would change the plan, not just an implementation detail).
+2. CI repeatedly fails on a change you cannot diagnose after the 3-strike fix budget is spent.
+3. A hard infra failure prevents ALL progress (after attempting recovery).
+4. **Stuck-but-busy detection**: you've fired >100 ticks OR run >12 hours **without shipping a single merged PR or issue closure**. Ping once: *"stuck in non-productive loop — please review brief, it may need redirection."* You may continue looping until the user responds, but assume the brief is wrong, not the work.
+
+**Not pings**: normal progress, phase completion, opening a PR, encountering a small bug you can fix. The progress log carries that.
+
+One ping per state, not per tick.
+
+## Exit conditions
+
+End the loop (write "## Final state" to `.claude/loop-progress.md`, omit `ScheduleWakeup`):
+
+1. The brief's definition-of-done is satisfied.
+2. All remaining work is blocked on user input that cannot be self-resolved (after one `PushNotification`).
+3. Hard infra failure preventing any progress.
+
+### Cleanup before exit
+
+Before writing "## Final state", tear down any services / docker containers / processes the loop started, UNLESS the brief's goal explicitly requires them running (e.g. "leave the dev stack up for morning demo"). The user should not wake up to leaked state.
+
+Common cleanups:
+
+- `docker compose -f <compose-file> down` for stacks the loop brought up
+- Stop any local services the loop launched (`lsof -nPi tcp:<port> -sTCP:LISTEN -t` → `kill <PID>`). Do NOT kill processes you didn't start — IDE-launched services may carry breakpoints, debugger state, or hot-reload the user is mid-session on.
+- Cancel any pending `ScheduleWakeup` you queued earlier in the same tick
+
+Note in `## Final state` what was cleaned up and what (if anything) is intentionally left running, so the user knows what's still consuming resources.
+
+### The Final state note
+
+The "Final state" paragraph is what the user reads cold when they return — make it the clearest paragraph in the progress log. Include: what shipped, what's outstanding, what they should do next, what's still running (if anything).
+
+## Post-compaction bootstrap
+
+If `/loop` fires you with this file and you have no memory of this session:
+
+1. You're reading this file now — it's your re-entry point. The rules above are loaded.
+2. `cat .claude/loop-brief.md` — the goal.
+3. `bash .claude/loop-status.sh` — the state.
+4. `cat .claude/loop-progress.md` — what's already shipped.
+5. Resume on the next incomplete task. Do not restart from scratch.
+
+## Tool cheatsheet
+
+- Status snapshot: `bash .claude/loop-status.sh`
+- Open PR: `gh pr create --fill`
+- Auto-merge a PR: `gh pr merge --auto --squash --delete-branch`
+- Check PR state: `gh pr view <num> --json state,mergeStateStatus,statusCheckRollup,headRefOid`
+- Comment on issue: `gh issue comment <num> --body "..."`
+- Edit issue body (checkbox flips): `gh issue edit <num> --body "..."`
+- Review a PR: use `Skill` tool with `skill: review` (only for meaningful PRs — see rule above)
+- Hit a running remote env (query / patch / redeploy / troubleshoot) — if your project has a deploy-ops skill: use `Skill` tool with `skill: live-ops`, `args: "<env> <task>"`
+- **Finish a chunk of work cleanly** (review pending changes, run tests, tidy, open PR, squash-merge) — if your project has a wrap-up skill: use `Skill` tool with `skill: wrap-up`. Prefer this over hand-scripting the PR+merge cycle from scratch — it bakes in the project's PR-first idioms.
+- Schedule next tick: `ScheduleWakeup({delaySeconds: N, prompt: "<<loop.md-dynamic>>", reason: "..."})`
+- Ping user: `PushNotification` — see "When to ping" for criteria
+- Check disk pressure (if Docker / image-build heavy): `df -h /` and `docker system df`. If under 10 GB free, `docker system prune -f` opportunistically.
