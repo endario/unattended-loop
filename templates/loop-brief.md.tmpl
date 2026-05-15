@@ -28,6 +28,8 @@ Default rules in `loop.md` are in force. Session-specific carve-outs below.
 
 ### Off-limits without user input
 
+> Use this for **both** gated decisions (e.g. "anything that touches production credentials — PushNotification before acting") **and** paths/modules to leave alone (e.g. "do not touch `modules/website` — separate refactor in flight"). The loop reads this section every tick before acting.
+
 {{OFF_LIMITS}}
 
 ### Pre-approved beyond defaults

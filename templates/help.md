@@ -66,6 +66,19 @@ While the loop runs, edit `<repo-root>/.claude/loop-brief.md`. The next tick rea
 - Interrupt during an active tick, OR
 - Let it self-detect DoD and write `## Final state` to `loop-progress.md`.
 
+## What kills the loop unintentionally
+
+The loop is a chain of scheduled wakeups inside **one** Claude Code session. If the Claude Code session ends, the loop ends — wakeup queue and all. Specific failure modes:
+
+- **Laptop sleeps** → wakeup queue pauses; may not resume cleanly when the lid opens. Use `caffeinate -dimsu &` (see pre-flight checklist) to prevent sleep on AC power.
+- **Claude Code window closed** → loop dies.
+- **`/exit` in Claude Code** → loop dies.
+- **Long network outage** → connection to model times out, session may die. Workstations on flaky VPNs are a known weak point.
+- **Claude Code usage quota hit** → session terminates. Wakeups already queued do not fire (they live in the dead session). The loop cannot self-revive after a quota event; the user must re-fire `/loop <<loop.md-dynamic>>` after the quota window reopens.
+- **Unhandled model-side error** → loop dies.
+
+If you find a dead loop when you return, the harness state on disk (`loop-progress.md`, `loop-brief.md`) is intact. Re-fire `/loop <<loop.md-dynamic>>` and it resumes on the next incomplete task per the bootstrap recipe in `loop.md`.
+
 ## Full detail
 
 `~/.claude/skills/unattended-loop/SKILL.md`

@@ -23,13 +23,31 @@ This is the source of truth for **what** you're doing. Goal, plan/track pointers
 bash .claude/loop-status.sh
 ```
 
-Output: parent + submodule branches, recent commits, open PRs across affected repos with merge-state, tail of progress log. **Read this before deciding the next action.** Do not restart from step 1 of the plan if step 1 already shipped — the status script tells you what shipped.
+Output: brief-change detection, parent + submodule branches, recent commits, open PRs (with `mergeStateStatus`), this-session issues you filed, plan checkbox progress, health (gh auth + API rate + disk + Docker disk), throughput (time since last entry + entries since last shipped event + max log line length), tail of progress log. **Read this before deciding the next action.** Do not restart from step 1 of the plan if step 1 already shipped — the status script tells you what shipped.
+
+**Watch for `BRIEF UPDATED SINCE LAST ACK`** at the top of the output. That's the user steering you mid-flight. When you see it: re-run `cat .claude/loop-brief.md` to get the current version (your step-1 read may pre-date the user's edit), then append a `BRIEF UPDATED:` line to the progress log this tick **including the `ack-hash:` value the status script gave you** — that's how the next tick will know you saw the change:
+
+```
+- <ts> — BRIEF UPDATED: <one-line summary of what changed and how it shifts the work>. ack-hash: <64-hex-chars-from-status-output>
+```
+
+On the very first tick you'll see `(first observation — no prior ack-hash in progress log)`; log a `BRIEF ack (initial). ack-hash: <hash>` line so subsequent ticks have a baseline to compare against.
+
+**Watch the `Health` block.** If `gh auth: FAILED`, no PR/issue ops will work until it's restored — `PushNotification` the user (legitimate ping per "When to ping"). If `WARN: <500 API calls remaining`, drop your `gh` call frequency (skip non-essential `gh issue list` until next rate-limit reset, typically the next clock hour). If disk WARN fires (>85%), prune (`docker system prune -f` if Docker is in scope) or `PushNotification`.
+
+**Watch the `Throughput` block.** This is your spin-and-stall objective signal — it does not lie the way self-judgment does:
+
+- `WARN: >5 progress entries since last shipped event` → the SPIN-CAP rule applies. See `### Spin budget per subtask`. Do not wave this off.
+- `WARN: >2h since last progress-log entry` → either you're working without logging (fix that — log per step 4) or a previous `ScheduleWakeup` silently failed (check the prompt sentinel, re-fire if needed).
+- `WARN: longest progress-log entry exceeds 200 chars` → you're writing reasoning into the log instead of one-line events. Move the reasoning to commit bodies / PR descriptions.
 
 **Throttle**: run `loop-status.sh` once per tick, not in tight inner sub-loops. It executes multiple `gh` API calls — fine per tick, but spamming it (e.g. polling a single PR every 30s by re-running it) burns GitHub API rate budget unnecessarily. For watching a single in-flight PR, use the watcher pattern from `CLAUDE.md` §Watching auto-merged PRs (~120s interval, log only on state transitions).
 
 ### 3. Advance one task
 
 Combining the brief + status, pick the next concrete task and execute it. The rules below are not optional — they apply to every task.
+
+**A "task" is not complete until the source documentation and tracked issues reflect it.** Plan checkboxes ticked, umbrella / phase issue checkboxes flipped or closed, design doc amended if the implementation revealed a correction — these land in the same PR as the code change that made them true, not as a follow-up tick. See `### Keep source docs and issues current` below for the full rule.
 
 ### 4. Append to the progress log
 
@@ -38,6 +56,8 @@ After each meaningful step (test failing, test passing, PR opened, PR merged, ph
 ```
 - YYYY-MM-DD HH:MM — <what shipped or happened> — <link to PR / commit / issue>
 ```
+
+**One line per event. No multi-paragraph entries, no inline reasoning.** Reasoning belongs in commit bodies, issue comments, or PR descriptions where it has lasting value. The progress log is a timestamped audit trail — keep it scannable. If you find yourself writing more than ~150 characters, the long part is reasoning and belongs elsewhere.
 
 **For the timestamp, use the value from `loop-status.sh`'s `=== loop-status @ <ts> ===` header — do NOT guess.** Training-data cached date strings drift; the status script's `date` output is the only authoritative source. If you haven't run the status script this tick, run `date '+%Y-%m-%d %H:%M:%S %Z'` directly before appending. Loops have written dates one or more days off when this was inferred rather than read.
 
@@ -74,6 +94,30 @@ Logic changes follow failing-test → minimal impl → green → commit. Show th
 
 Run the project's test command for the affected module before `gh pr create`. Do not open PRs with locally-failing tests "to let CI catch it." For UI changes, run the project's e2e harness if it has one (often documented in the project's `CLAUDE.md`).
 
+### Test-skip discipline — do not silently green a failing test
+
+Unattended Claude under no-stop pressure has the strongest incentive to make a failing test "go away" cheaply. **Don't.** A green CI achieved by hiding the failure is the most expensive form of dishonest progress — the user will notice, and the cost of unwinding it (revert + re-implement + lost trust) exceeds the cost of leaving the test red.
+
+Forbidden patterns (each of these is a tell that you took the easy way out):
+
+- Deleting a test you didn't introduce in this session, or that you can't articulate a documented reason to remove. Note: **TDD rewrites are not deletions** — replacing a test's body to encode new intent (case 2 below) is the correct path, not a forbidden one.
+- Marking it as skipped: `@Ignore` / `@Disabled` / `xit` / `it.skip` / `describe.skip` / `pytest.mark.skip` / `t.Skip()` / `#[ignore]` / etc.
+- Using `pytest.mark.xfail` **without `strict=True`** and a `reason=` linking an issue. Bare `xfail` lets a passing test silently pass and a failing test silently fail — the worst of both. `@pytest.mark.xfail(strict=True, reason="Ref: org/repo#NNN")` is acceptable because it forces the bug-still-exists assertion.
+- Commenting out assertions, or the entire test body.
+- Replacing real assertions with no-ops: `assertTrue(true)`, `expect(true).toBeTruthy()`, `assert 1 == 1`, etc.
+- Mocking the unit under test (its dependencies are fine to mock; itself is not).
+- Lowering coverage thresholds, suppressing lint rules, or relaxing CI gates to slip a check past.
+- "Temporarily" reducing strictness (`@Suppress`, `// eslint-disable`, `# noqa`) on lines you just added — temporary in unattended mode means permanent.
+
+The correct moves when a test fails:
+
+1. **Test is right, code is wrong** — fix the code per TDD discipline.
+2. **Test asserts old behavior; new behavior is intentional** — rewrite the test body to encode the new intent. This is the legitimate "rewrite" case referenced from the deletion rule above. Document in the commit body what changed and why. `/review` the PR.
+3. **Test is flaky and you can't fix it this session** — file an issue with the failure log, reference it in the commit body (`Ref: owner/repo#N`), and **leave the test red**. Critically: when leaving a test red, **do not `gh pr merge --auto`** — convert the PR to draft (`gh pr ready --undo <num>`) or leave it open without auto-merge. Otherwise the required-checks gate may let it ship anyway (if the flaky check isn't required), and the red signal evaporates in your sleep. The flaky-issue + draft-PR combination is what the user wakes up to and decides on.
+4. **Test is genuinely obsolete** — delete it with a commit body explaining what it covered and why coverage is no longer needed. Two consecutive deletions of "obsolete" tests is a code smell; pause and reconsider.
+
+If you find yourself reaching for an `@Ignore` or `it.skip` annotation in unattended mode, stop and re-read this section. The annotation will eventually be noticed; the issue will not.
+
 ### Local-ops greenlight
 
 You have permission to start / stop / restart the project's local services, and to `docker compose up/down/restart` development containers. Before killing a service, self-check via `lsof -nPi tcp:<port> -sTCP:LISTEN -t` + `ps -p <PID> -o command=` so you don't disrupt an IDE-attached process the user left running (debugger state, hot-reload, terminal output). The user is away — you are the user-equivalent for this session; do not ping for local-ops permission.
@@ -94,6 +138,40 @@ If the same failure recurs (same test red, same CI check failing, same exception
 
 A "real attempt" is a code change + test run, not just re-triggering CI on the same diff. Three real attempts is your budget — after that you're spinning, not progressing.
 
+### Stuck-op detection — no state change across N ticks
+
+Distinct from the 3-strike rule: this catches *no state change*, not *same failure 3x*. A PR sitting in `BEHIND` for 4 hours while you poll it is not progress.
+
+If across ~**6 consecutive ticks** (≈30 min at the 270s polling cadence) a PR's `mergeStateStatus` remains in a non-`MERGED` non-`CLEAN` state, OR a CI run stays pending without any check transitioning, take **active** steps. Don't just keep polling.
+
+State → remediation:
+
+- `BEHIND` → `gh pr update-branch <num>` rebases the head branch onto base. If that fails because the branch is protected or auto-update is disabled, rebase locally and force-push. **Verify the head branch is not `main` or the repo default before force-pushing** (`gh pr view <num> --json headRefName,baseRefName`). Force-pushing `main` is catastrophic and is never the right move; if you find yourself "needing" to do it, file an issue and `PushNotification`. Use `git -C <repo> push --force-with-lease` for non-default branches.
+- `DIRTY` → merge conflicts. Resolve them if trivial (~1 file, obvious intent). If non-trivial, file an issue with the conflict surface and move to an independent task — do not spend an hour on a merge resolution that wasn't part of the plan.
+- `UNSTABLE` → `gh pr checks <num>` to see which check is failing; if it looks flaky (timeout, runner crash, network blip), `gh run rerun <id> --failed`. If it's a real failure, debug it as a 3-strike subtask.
+- `BLOCKED` → required reviews missing, unresolved review comments, or a protected-branch policy. `gh pr view <num> --json reviewDecision,reviewRequests`. Resolve any comments you can. **If reviews are required from a human (the user is the only reviewer in solo-developer setups), this is a one-time `PushNotification` trigger — and then *move on to the next independent task*.** `BLOCKED` on human review is not an exit condition for the loop; the user reviewing in the morning is part of the normal cycle. Do not park the whole loop waiting for one human review.
+- `UNKNOWN` → GitHub hasn't computed mergeability yet (common on freshly-opened PRs). Wait one more tick. If still `UNKNOWN`, run `gh pr view <num>` to nudge the mergeability cache, then wait one more tick. If still `UNKNOWN` after that, treat it as a stuck-op and remediate.
+- CI pending forever → `gh run list -L 5` to check whether runners are healthy. Re-trigger with `gh run rerun <id>` if it looks orphaned.
+
+If 2 more ticks pass after the active remediation attempt and the state still hasn't moved, file an issue capturing the stuck state + everything you tried, mark the task `blocked:` in the progress log, and move to an independent task. **One stuck PR must not consume the whole loop.**
+
+### Spin budget per subtask — caps depth, not recurrence
+
+The 3-strike rule caps *recurrence* of the same failure. This rule caps *depth* on a single subtask before you've even failed three times — for the case where you're producing motion but not progress.
+
+Heuristic checks:
+
+- **Within a tick:** if you've made ~**15 or more tool calls** on the current subtask in this tick with no concrete state change to show for it, you are spinning.
+- **Across ticks:** if **3 or more consecutive ticks** of the progress log say variations of "still working on `<subtask>`" with no shipped event between them, you are spinning across the boundary. The status script's progress-log tail makes this visible.
+
+"Concrete state change" means something verifiable in `git log` / `gh pr list` / `gh issue list` / plan-checkbox state: a commit, a test newly green, a PR opened or merged, an issue filed or closed, a plan checkbox flipped. "I now understand the problem better" and "I narrowed down the cause" are **not** state changes.
+
+When you hit either threshold:
+
+1. Append `- <ts> — SPIN-CAP on <subtask>: tried <approach 1>, <approach 2>, <approach 3> — none progressed state.` to the progress log.
+2. File an issue with what you attempted, the symptoms, and your current hypothesis. Reference any commits / branches that captured partial work.
+3. **Move to the next independent task in the plan.** Do not loop back to the same subtask later in the same session — leave it for fresh-context Claude on the next session.
+
 ### PR-first
 
 Every change via branch → PR → squash-merge per `CLAUDE.md` §Workflow: PR-first. Direct-push to main only for the allowlisted cases (release commits, mechanical pointer bumps, emergencies). Auto-merge:
@@ -108,9 +186,20 @@ For PRs you auto-merged, run the watcher pattern from `CLAUDE.md` §Watching aut
 
 After a submodule PR merges, fast-forward the submodule's local `main` and bump the parent pointer per `CLAUDE.md` §Pointer-bump pattern. The parent-branch guard (`git -C <parent> branch --show-current` must equal `main` before staging) is mandatory — session-start branch state can drift.
 
-### Docs kept pristine
+### Keep source docs and issues current
 
-After each phase / major milestone, update the canonical plan / design docs to reflect what was found, learned, changed. The doc is the durable artefact; the code is the ephemeral one. If the spike surfaced a design correction, update the design doc in the same PR.
+**Every tick, before scheduling the next one.** Source documentation (design doc, plan / spec, spike write-ups) and tracked issues (umbrella issue checklist, phase / task issues, follow-up issues you filed) stay in lockstep with what actually shipped. They are the durable artefact; the code and the progress log are the ephemeral ones.
+
+What this means in practice:
+
+- **Plan checkboxes** — tick them as steps complete. Add new checkboxes when you discover sub-steps. Strike out steps you decided to skip and note why.
+- **Umbrella / phase issues** — flip the checkbox or close the issue the moment the work that satisfies it has merged. Comment with the PR link. Don't let a closed-in-code-but-open-in-tracker drift accumulate over the session — that's exactly the "fix lands, ticket never closes" pattern the project has been bitten by.
+- **Design doc** — if implementation surfaced a correction, omission, or new constraint, update the design doc **in the same PR** as the code change. Locked decisions (per `### Don't re-litigate locked decisions`) are not for you to rewrite — file an issue and continue. But rules that are merely *stale* are yours to fix.
+- **Follow-up issues** — file them as you go (per the project's O5 / "park, don't abandon" guidance). Don't carry an undocumented "I should fix this later" item across more than one tick.
+
+**Before `ScheduleWakeup` at the end of each tick:** scan what merged this tick and confirm the design / plan / issue state reflects it. If it doesn't, fix it *this tick*, not next. A tick that shipped code but left the plan, design doc, or umbrella issue stale is a tick that failed half its job.
+
+**Before writing `## Final state` (the exit step):** the design doc, plan, umbrella issue, and any phase issues touched must be fully reconciled with the merged code. This is a hard gate — see the `### Cleanup before exit` checklist. A loop that ends with stale docs or open-but-actually-done issues did not finish, regardless of how much code shipped.
 
 ### Don't re-litigate locked decisions
 
@@ -159,7 +248,16 @@ End the loop (write "## Final state" to `.claude/loop-progress.md`, omit `Schedu
 
 Before writing "## Final state", tear down any services / docker containers / processes the loop started, UNLESS the brief's goal explicitly requires them running (e.g. "leave the dev stack up for morning demo"). The user should not wake up to leaked state.
 
-Common cleanups:
+**First, reconcile docs and issues with reality** (this is non-negotiable — see `### Keep source docs and issues current`):
+
+- Walk the plan / spec end to end. Every shipped step has its checkbox ticked. Every deferred step is explicitly marked deferred with a reason. No "in progress" steps left in an ambiguous state.
+- Walk the umbrella issue and any phase / task issues touched this session. Anything actually done in code is checked off / closed in the tracker, with the PR link in a closing comment. Anything blocked has the block documented.
+- The design doc reflects every correction the implementation surfaced. If a locked decision was opened on the user's authority, the doc says so; if a stale rule got rewritten, the new version is what's there.
+- Any follow-up items observed but not done this session are tracked issues, not loose mentions in the progress log.
+
+If you find drift during this walk, fix it before writing Final state. **The Final state note should be able to truthfully say "docs, plan, and issues are current."** If it can't, the loop has not finished its job.
+
+Then handle process / service cleanup:
 
 - `docker compose -f <compose-file> down` for stacks the loop brought up
 - Stop any local services the loop launched (`lsof -nPi tcp:<port> -sTCP:LISTEN -t` → `kill <PID>`). Do NOT kill processes you didn't start — IDE-launched services may carry breakpoints, debugger state, or hot-reload the user is mid-session on.
@@ -169,7 +267,13 @@ Note in `## Final state` what was cleaned up and what (if anything) is intention
 
 ### The Final state note
 
-The "Final state" paragraph is what the user reads cold when they return — make it the clearest paragraph in the progress log. Include: what shipped, what's outstanding, what they should do next, what's still running (if anything).
+The "Final state" paragraph is what the user reads cold when they return — make it the clearest paragraph in the progress log. Include:
+
+- What shipped (PRs merged, phases closed).
+- **Docs and issues state** — state explicitly that the plan, design doc, umbrella issue, and phase issues have been reconciled with what merged (per `### Cleanup before exit`). If any are intentionally left in an unreconciled state, say which and why.
+- What's outstanding.
+- What the user should do next.
+- What's still running (services, containers, processes), if anything.
 
 ## Post-compaction bootstrap
 

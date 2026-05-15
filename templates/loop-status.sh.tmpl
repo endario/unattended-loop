@@ -12,8 +12,47 @@ if [ -z "$repo_root" ]; then
 fi
 cd "$repo_root"
 
+# Portable SHA-256: macOS ships `shasum`, most Linux ships `sha256sum`.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
 now="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 echo "=== loop-status @ $now ==="
+echo
+
+echo "=== Brief change detection ==="
+# Ack-hash lives in the progress log (not a side file) — observation is read-only,
+# acknowledgement is the act of logging. No race between status-read and ack-write.
+if [ -f .claude/loop-brief.md ]; then
+  cur_hash=$(sha256_of .claude/loop-brief.md)
+  last_acked_hash=""
+  if [ -f .claude/loop-progress.md ]; then
+    last_acked_hash=$(grep -oE 'ack-hash:[[:space:]]*[0-9a-f]{64}' .claude/loop-progress.md \
+      | tail -1 | awk '{print $NF}')
+  fi
+  if [ -z "$cur_hash" ]; then
+    echo "(sha256 utility unavailable — install sha256sum or shasum; brief-change detection disabled this tick)"
+  elif [ -z "$last_acked_hash" ]; then
+    echo "(first observation — no prior ack-hash in progress log)"
+    echo "On your first progress-log entry this tick, include the brief hash:"
+    echo "    - <ts> — BRIEF ack (initial). ack-hash: $cur_hash"
+  elif [ "$cur_hash" != "$last_acked_hash" ]; then
+    echo "BRIEF UPDATED SINCE LAST ACK — user steered mid-flight."
+    echo "Acknowledge in progress log this tick:"
+    echo "    - <ts> — BRIEF UPDATED: <one-line summary of what changed>. ack-hash: $cur_hash"
+  else
+    echo "(brief unchanged since last ack)"
+  fi
+else
+  echo "WARNING: loop-brief.md missing — loop should end (see loop.md)."
+fi
 echo
 
 echo "=== Parent repo ($(basename "$repo_root")) ==="
@@ -52,6 +91,11 @@ if [ -z "$repos" ]; then
   origin=$(git remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')
   repos="$origin"
 fi
+# Strip any `.git` suffix that survived the regex/origin extraction.
+repos=$(printf '%s\n' $repos | sed 's/\.git$//' | sort -u)
+if [ -z "$repos" ]; then
+  echo "(no GitHub repos resolved — Open PRs / This-session issues skipped)"
+fi
 for repo in $repos; do
   echo "-- $repo --"
   gh pr list -R "$repo" --state open \
@@ -60,6 +104,139 @@ for repo in $repos; do
       "#\(.number) \(.title) — \(.mergeStateStatus) — head=\(.headRefOid[0:8]) — failing=\([.statusCheckRollup[]? | select(.conclusion=="FAILURE") | (.name // .context // "?")] | join(",") | if . == "" then "0" else . end)"' \
     2>/dev/null || echo "(gh failed for $repo)"
 done
+echo
+
+echo "=== This-session issues (filed by you) ==="
+# Session start = first dated line in the progress log.
+session_start=""
+if [ -f .claude/loop-progress.md ]; then
+  session_start=$(grep -oE '^- 20[0-9]{2}-[0-9]{2}-[0-9]{2}' .claude/loop-progress.md | head -1 | sed 's/^- //')
+fi
+if [ -n "$session_start" ] && [ -n "$repos" ]; then
+  echo "Filed by you since $session_start:"
+  any_issues=0
+  for repo in $repos; do
+    out=$(gh issue list -R "$repo" --search "author:@me created:>=$session_start" --state all -L 30 \
+      --json number,title,state \
+      --jq '.[] | "  #\(.number) [\(.state)] \(.title)"' 2>/dev/null)
+    if [ -n "$out" ]; then
+      echo "-- $repo --"
+      echo "$out"
+      any_issues=1
+    fi
+  done
+  [ "$any_issues" -eq 0 ] && echo "  (none yet — file follow-ups as you go, per loop.md §Keep source docs and issues current)"
+else
+  echo "(no session-start timestamp in progress log, or no repos to query)"
+fi
+echo
+
+echo "=== Plan progress ==="
+# Plan path is in `- Plan: \`<path>\`` (Markdown backticks) in the brief.
+plan_path=$(sed -n 's/^- Plan: *`\([^`]*\)`.*/\1/p' .claude/loop-brief.md 2>/dev/null | head -1)
+if [ -z "$plan_path" ]; then
+  plan_path=$(sed -n 's/^- Plan: *//p' .claude/loop-brief.md 2>/dev/null | head -1 | awk '{print $1}')
+fi
+if [ -n "$plan_path" ] && [ -f "$plan_path" ]; then
+  # grep -c always emits a number, even on no-match (exit 1) — avoid the `|| echo 0`
+  # double-emission trap. Just suppress the exit code, then numeric-coerce defensively.
+  total=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[ xX]\]' "$plan_path" 2>/dev/null); :
+  checked=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[xX]\]'  "$plan_path" 2>/dev/null); :
+  total=$((${total:-0} + 0))
+  checked=$((${checked:-0} + 0))
+  echo "Plan: $plan_path"
+  echo "Checkboxes: $checked / $total complete"
+  if [ "$total" -gt 0 ] && [ "$checked" -lt "$total" ]; then
+    echo "Next unchecked (up to 5):"
+    grep -nE '^[[:space:]]*-[[:space:]]*\[ \]' "$plan_path" | head -5 | sed 's/^/  /'
+  fi
+else
+  echo "(no plan path in brief, or path does not exist: ${plan_path:-<unset>})"
+  echo "  — if the brief's plan reference is correct, this is fine; not all loops are plan-driven."
+fi
+echo
+
+echo "=== Health ==="
+# gh auth — silent failures kill the loop until it's restored.
+if gh auth status >/dev/null 2>&1; then
+  echo "gh auth: OK"
+  # API rate budget — secondary limits can bite on fast-tick workloads.
+  remaining=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null)
+  if [ -n "$remaining" ]; then
+    echo "gh API rate (core): $remaining remaining"
+    if [ "$remaining" -lt 500 ] 2>/dev/null; then
+      echo "WARN: <500 API calls remaining in current hour. Throttle gh calls or wait for reset."
+    fi
+  fi
+else
+  echo "gh auth: FAILED — no PR/issue ops will work until re-authed (PushNotification trigger)."
+fi
+# Disk — overnight Docker pulls + image builds fill `/` fast. Parse numeric percent for a clear WARN.
+df_line=$(df -h / 2>/dev/null | awk 'NR==2')
+if [ -n "$df_line" ]; then
+  df_human=$(echo "$df_line" | awk '{print "used "$3" of "$2" ("$5" full); "$4" free"}')
+  df_pct=$(echo "$df_line" | awk '{gsub(/%/,"",$5); print $5}')
+  echo "Disk /: $df_human"
+  if [ -n "$df_pct" ] && [ "$df_pct" -gt 85 ] 2>/dev/null; then
+    echo "WARN: / is >85% full. Run \`docker system prune -f\` if Docker is in scope, or PushNotification."
+  fi
+else
+  echo "Disk /: <unavailable>"
+fi
+# Docker disk — only meaningful if the daemon is up.
+if docker info >/dev/null 2>&1; then
+  echo "Docker disk:"
+  docker system df 2>/dev/null | sed 's/^/  /'
+else
+  echo "Docker: daemon not reachable (skip)"
+fi
+echo
+
+echo "=== Throughput ==="
+# Surface objective signals that the spin-budget rule in loop.md depends on:
+# - time since last progress-log entry (catches silently-stalled loop)
+# - entries since last shipped event (catches "ticks happening but nothing ships")
+# - max line length (enforces one-line-per-event discipline in the log)
+if [ -f .claude/loop-progress.md ]; then
+  total_entries=$(grep -cE '^- 20[0-9]{2}' .claude/loop-progress.md 2>/dev/null); :
+  total_entries=$((${total_entries:-0} + 0))
+  # Last shipped-event line number. Keywords match the per-tick recipe's "meaningful step" list.
+  last_ship_lineno=$(grep -nEi '^- 20[0-9]{2}.* (opened|merged|closed|complete[d]?|shipped|filed|fixed|deployed|reverted)' .claude/loop-progress.md 2>/dev/null \
+    | tail -1 | cut -d: -f1)
+  if [ -z "$last_ship_lineno" ]; then
+    entries_since_ship=$total_entries
+  else
+    entries_since_ship=$(awk -v ln="$last_ship_lineno" 'NR>ln && /^- 20[0-9]{2}/{c++} END{print c+0}' .claude/loop-progress.md)
+  fi
+  echo "Entries: $total_entries, since last shipped event: $entries_since_ship"
+  if [ "$entries_since_ship" -gt 5 ] 2>/dev/null; then
+    echo "WARN: >5 progress entries since last shipped event — review SPIN-CAP rule in loop.md."
+  fi
+  # Time delta from last entry to now. Date parsing is OS-dependent; try BSD then GNU.
+  last_ts=$(grep -oE '^- 20[0-9]{2}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' .claude/loop-progress.md \
+    | tail -1 | sed 's/^- //')
+  if [ -n "$last_ts" ]; then
+    last_epoch=$(date -j -f '%Y-%m-%d %H:%M' "$last_ts" +%s 2>/dev/null \
+              || date -d "$last_ts" +%s 2>/dev/null \
+              || echo "")
+    if [ -n "$last_epoch" ]; then
+      now_epoch=$(date +%s)
+      elapsed_min=$(( (now_epoch - last_epoch) / 60 ))
+      echo "Last entry: $last_ts (${elapsed_min} min ago)"
+      if [ "$elapsed_min" -gt 120 ] 2>/dev/null; then
+        echo "WARN: >2h since last progress-log entry. Loop may be silently stalled or a ScheduleWakeup failed silently."
+      fi
+    fi
+  fi
+  # Max line length — enforces the "one line per event, no inline reasoning" rule.
+  max_len=$(awk '/^- 20/{if(length>max) max=length} END{print max+0}' .claude/loop-progress.md)
+  echo "Max progress-log entry length: $max_len chars"
+  if [ "$max_len" -gt 200 ] 2>/dev/null; then
+    echo "WARN: longest progress-log entry exceeds 200 chars — see one-line-per-event rule in loop.md."
+  fi
+else
+  echo "(loop-progress.md not yet present)"
+fi
 echo
 
 echo "=== Progress log tail (last 25 lines) ==="
