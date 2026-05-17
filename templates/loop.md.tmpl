@@ -201,6 +201,37 @@ What this means in practice:
 
 **Before writing `## Final state` (the exit step):** the design doc, plan, umbrella issue, and any phase issues touched must be fully reconciled with the merged code. This is a hard gate — see the `### Cleanup before exit` checklist. A loop that ends with stale docs or open-but-actually-done issues did not finish, regardless of how much code shipped.
 
+### Implementation flexibility — the plan is a route, not a straightjacket
+
+Spot fixes, in-phase course corrections, and folding in mid-phase learnings are expected and normal. The plan tells you what the phase is FOR; it does not pre-decide every commit. Within a phase you have wide latitude — adjust task order, fix things you didn't plan to fix when they're already in the blast radius, change implementation approach if testing reveals a better one, deviate from a plan step when the reality demands it. **Update the plan to reflect what actually happened** (per `### Keep source docs and issues current`); don't burn the plan to match your improvisation, but don't pretend the plan was followed verbatim either.
+
+What stays disciplined regardless: phase boundaries (per `### Phase-boundary discipline` — the next phase's design must already exist; whole-phase improvisation is not OK), locked architectural decisions (per `### Don't re-litigate locked decisions`), test-skip discipline, hooks / signing, and the three DoD gates.
+
+The DoD is the contract; the plan is the route. Find a better route on the day — fine. Skip the destination — not fine.
+
+### Phase-boundary discipline — do not break off between phases
+
+Multi-phase tracks fail when the agent finishes one phase and stalls because next-phase work was never designed. The setup audit (`unattended-loop` SKILL.md step 2.5) is meant to prevent this — every phase should already have a design, critic / review pass, plan, test approach, and live-ops E2E approach before the loop fires. On every phase boundary you also have positive obligations on **both sides** — do not "break off" and wait.
+
+**Closing the phase you just finished — all four required:**
+
+1. Run the project's tests for the affected modules — full module suite, not just the tests you wrote this phase.
+2. Run a live-ops E2E (per `CLAUDE.md` §Verifying backend / platform changes — `/live-ops` skill if your project has one) for any backend / platform / connector change whose blast radius is not contained. Doc-only and isolated-refactor phases are exempt.
+3. Reconcile design doc, plan checkboxes, and the umbrella / phase issue for the closing phase. Per `### Keep source docs and issues current` this is already a per-tick obligation; on a phase boundary it is a hard gate — do not open the next phase with the closing phase's tracker artefacts still stale.
+4. Log the closure as a one-liner in the progress log (the per-tick recipe step 4 format).
+
+**Opening the next phase — all four required, in order:**
+
+1. Re-read the design and plan for the next phase. Three cases:
+   - **Design + plan exist** (Path A from setup, or Path B where this phase wasn't deferred) → proceed to step 2.
+   - **Design + plan don't exist AND the brief's `## Notes for future-you` records this phase as a deliberately deferred Path B phase** → this is the on-boundary design moment. Engage the appropriate critic + reviewer skills (`Skill` tool — typically architecture-critic + per-language reviewer per the project's `CLAUDE.md`), produce a design + plan + test approach + live-ops E2E approach for the phase, commit them to the design doc / plan / umbrella checklist, then proceed. This may take a tick or several — that's the cost of deferral, paid deliberately. Log a `- <ts> — PHASE BOUNDARY DESIGN: <phase> (deferred per brief). Critic: <result>. Reviewer: <result>.` line before continuing.
+   - **Design + plan don't exist AND the brief does not record a deliberate deferral for this phase** → this is the accidental-improvisation failure mode the setup audit (`unattended-loop` SKILL.md step 2.5) was meant to prevent. File an issue, mark the track `blocked: phase-N undesigned (no recorded deferral)`, `PushNotification` once, and exit the loop per `## Exit conditions`. **Do not silently improvise a design when no deferral was agreed** — that's the bad outcome regardless of how the loop ends up.
+2. If the just-closed phase surfaced corrections affecting the next phase's design, update the design doc and plan now (same rule as `### Keep source docs and issues current`, applied to the upcoming phase).
+3. If the design pre-existed (didn't come from step 1's on-boundary design), run the appropriate critic / reviewer skills on it now before writing any code for the phase. The on-boundary design path already includes this; the pre-existing path may not have re-validated against what the prior phase taught.
+4. Log the boundary: `- <ts> — PHASE BOUNDARY: closed <prev>, opening <next>. Tests: <result>. Live-ops: <result | n/a>. Docs/issues: reconciled. Next-phase design: <pre-existing reviewed | designed on boundary per Path B | no changes>.`
+
+Only after both halves are done does the next concrete task begin. A phase transition is one of the few moments where extra discipline pays off many ticks of saved time later.
+
 ### Don't re-litigate locked decisions
 
 Architectural decisions locked in the design doc or in prior memory entries are not reopened during an unattended session. If you find something that looks wrong, file an issue documenting the concern and continue with the documented approach.
@@ -248,14 +279,20 @@ End the loop (write "## Final state" to `.claude/loop-progress.md`, omit `Schedu
 
 Before writing "## Final state", tear down any services / docker containers / processes the loop started, UNLESS the brief's goal explicitly requires them running (e.g. "leave the dev stack up for morning demo"). The user should not wake up to leaked state.
 
-**First, reconcile docs and issues with reality** (this is non-negotiable — see `### Keep source docs and issues current`):
+**First, verify the three DoD gates** (default DoD; the brief may have specified something different — if so, it overrides):
 
-- Walk the plan / spec end to end. Every shipped step has its checkbox ticked. Every deferred step is explicitly marked deferred with a reason. No "in progress" steps left in an ambiguous state.
+1. **Full-feature live-ops E2E self-tested.** The end-to-end feature works against a running environment, not just per-phase smoke checks (per `CLAUDE.md` §Verifying backend / platform changes; use the `/live-ops` skill where applicable). Surface-only tracks (docs / isolated refactors) are exempt; backend / platform / connector / cross-module feature work is not. If a live-ops E2E has not been run for the whole-feature path in this session, run it now before writing Final state.
+2. **Documentation updated.** Design doc, plan / spec, README / module CLAUDE.md, and any onboarding or runbook touched by the work all reflect the shipped reality.
+3. **Issues curated.** Every plan checkbox ticked or marked deferred with a reason; umbrella / phase / task issues closed with the PR link in a closing comment; follow-up items filed as their own issues, not left in the progress log.
+
+Walk each of these end to end:
+
+- Walk the plan / spec. Every shipped step has its checkbox ticked. Every deferred step is explicitly marked deferred with a reason. No "in progress" steps left in an ambiguous state.
 - Walk the umbrella issue and any phase / task issues touched this session. Anything actually done in code is checked off / closed in the tracker, with the PR link in a closing comment. Anything blocked has the block documented.
 - The design doc reflects every correction the implementation surfaced. If a locked decision was opened on the user's authority, the doc says so; if a stale rule got rewritten, the new version is what's there.
 - Any follow-up items observed but not done this session are tracked issues, not loose mentions in the progress log.
 
-If you find drift during this walk, fix it before writing Final state. **The Final state note should be able to truthfully say "docs, plan, and issues are current."** If it can't, the loop has not finished its job.
+If you find drift during this walk, fix it before writing Final state. **The Final state note should be able to truthfully say "live-ops E2E green, docs current, issues reconciled."** If it can't, the loop has not finished its job.
 
 Then handle process / service cleanup:
 
@@ -270,7 +307,7 @@ Note in `## Final state` what was cleaned up and what (if anything) is intention
 The "Final state" paragraph is what the user reads cold when they return — make it the clearest paragraph in the progress log. Include:
 
 - What shipped (PRs merged, phases closed).
-- **Docs and issues state** — state explicitly that the plan, design doc, umbrella issue, and phase issues have been reconciled with what merged (per `### Cleanup before exit`). If any are intentionally left in an unreconciled state, say which and why.
+- **DoD gate status** — state explicitly: (1) live-ops E2E for the full feature green (or N/A with reason); (2) docs current (plan, design doc, README / CLAUDE.md, runbooks); (3) issues reconciled (umbrella + phase + task issues closed with PR links; follow-ups filed). If any gate is intentionally left unmet, say which and why.
 - What's outstanding.
 - What the user should do next.
 - What's still running (services, containers, processes), if anything.

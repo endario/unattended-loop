@@ -52,7 +52,13 @@ Natural-language invocation ("loop overnight on this") implies all defaults acti
 
 **Use this verbatim** when the user did not specify a DoD on invocation:
 
-> The entire track has been concluded — all checkboxes ticked in the plan / umbrella issue, all phase issues closed, smoke tests green where applicable. OR a genuine unresolvable blocker prevents further progress per `loop.md` §When to ping (after one `PushNotification` attempt). Normal back-pressure (CI flake, a bug you can debug, a test you can write) is not a stop condition — push through.
+> The entire feature track has been concluded. All three gates must be true:
+>
+> 1. **Full-feature live-ops E2E self-tested** — not just unit / module tests, not just per-phase smoke checks: the end-to-end feature has been exercised against a running environment (per `CLAUDE.md` §Verifying backend / platform changes, `/live-ops` skill where the project has one) and behaves correctly. Surface-only tracks (docs, isolated refactors) are exempt; everything else is not.
+> 2. **Documentation updated** — design doc, plan / spec, README / module CLAUDE.md, and any onboarding / runbook touched by the work all reflect the shipped reality. No stale rules, no "TODO: update" placeholders, no decisions taken but not written down.
+> 3. **Issues curated** — every plan checkbox ticked or explicitly marked deferred with a reason; umbrella + phase + task issues closed with the PR link in a closing comment; follow-up items observed during the track filed as their own issues (not left as loose mentions in the progress log).
+>
+> OR a genuine unresolvable blocker prevents further progress per `loop.md` §When to ping (after one `PushNotification` attempt). Normal back-pressure (CI flake, a bug you can debug, a test you can write) is not a stop condition — push through.
 
 Only deviate from the default if the user explicitly stated a different DoD on invocation. When in doubt, use the default and note any specifics under `## Notes for future-you` in the brief.
 
@@ -117,6 +123,35 @@ Run this scan checklist. For each source, look for the listed patterns and route
 Format findings as terse bullets. Each bullet should be **actionable** ("Phase 3 Auth0 PEM flow may require console action — PushNotification trigger") not descriptive ("Phase 3 is about Auth0").
 
 This output feeds the `{{NOTES}}`, `{{OFF_LIMITS}}`, and `{{PRE_APPROVED}}` substitutions in step 5.
+
+### 2.5. Scope analysis — pick the right design depth before entering the loop
+
+Multi-phase tracks fail in two opposite ways: launching with no design for later phases (agent stalls or improvises whole phases mid-loop), OR insisting on full end-to-end design when the later phases don't need it yet (over-investment, brittle plans for problems that haven't surfaced, risk of locking in the wrong architecture early). **Neither default is right — analyse the scope and make a judgement call.**
+
+For each remaining phase between current state and the DoD, look at: phase interdependency depth, how much later-phase design hinges on what earlier phases reveal, the risk surface, what's already pre-agreed with the user, and whether the agent has high confidence it can design the deferred work on-the-fly with critic + reviewer support. Then pick one of the following, **or a blend** (the paths are not mutually exclusive — full upfront for Phases 1–2, deferred for Phase 3 is a valid blend):
+
+**Path A — Full end-to-end design and plan up front.**
+Every phase has an actionable design, critic / reviewer pass (or explicit skip-decision), task-level plan, test approach, and live-ops E2E approach where `CLAUDE.md` §Verifying backend / platform changes applies. **Best fit** when phases have heavy interdependencies, the architecture is novel, late-phase rework cost justifies the upfront investment, or the user wants every commit pre-authorised.
+
+**Path B — Partial up front; defer the rest, design on-the-fly at phase boundary.**
+Design the next N phases fully; explicitly defer the remainder to be designed during the loop. **Legitimate only if all three hold:**
+- High confidence the deferred phases won't invalidate earlier decisions, OR a very good reason to defer (e.g. the design genuinely depends on what earlier phases reveal — load shape, vendor behaviour, real-world data).
+- A commitment to design each deferred phase **at its phase boundary** before opening it (per `loop.md` `### Phase-boundary discipline`), with critic + reviewer skills invoked — not improvising under spin-cap pressure with three minutes left in a tick.
+- The deferred phases are explicitly listed in the brief's `## Notes for future-you` as **deliberately deferred** (not silently missing), so phase-transition ticks know to expect the on-boundary design subroutine instead of treating the missing design as a failure.
+
+**Path C — Push back a narrower DoD; scope the loop down.**
+Propose to the user a tighter DoD like "loop up to and including Phase X" and leave later phases for a separate session. **Best fit** when scope is too large for one unattended run, when later phases carry risk the agent shouldn't take autonomously (security-sensitive surfaces, production credentials, vendor-coordination), when the user already wanted a checkpoint, or when the later-phase design simply isn't mature enough yet. Surface the recommendation explicitly with rationale (risk / unknown / pre-agreed scope) and update the brief's DoD accordingly.
+
+**What's not OK:** entering the loop with under-specified later phases as an *implicit* assumption that the agent will handle it — without naming that as a deliberate Path B with the conditions above met, or rescoping via Path C. The audit's purpose is preventing **accidental** whole-phase improvisation, not blocking deliberate progressive design or sensible scope reduction. Full upfront design is not always the right answer — it can over-commit to assumptions that the first phase will overturn.
+
+Document the chosen path (or blend) in the brief's `## Notes for future-you`, e.g.:
+- "Path A: all 4 phases designed upfront — see plan.md."
+- "Path B: Phases 1–2 fully designed; Phase 3 deferred — design at boundary using results from Phase 2's load tests. Reviewer: kotlin-vertx-reviewer."
+- "Path C: DoD scoped to Phases 1–3; Phase 4 (production rollout) left for a separate supervised session per user request."
+
+This is what future-you reads on a phase-transition tick to know whether to expect a ready design, trigger the deferred-design subroutine, or exit cleanly because the scoped DoD has been reached.
+
+**Flexibility caveat for in-phase work.** This audit is about pre-flight scope-depth, not commit-by-commit prescription. Within a phase, spot fixes, in-phase course corrections, and folding in mid-phase learnings are expected — see `loop.md` `### Implementation flexibility`.
 
 ### 3. Pick the repo
 
@@ -236,6 +271,7 @@ Run the checks below. Don't auto-fix machine state without permission — these 
 - [ ] **gh auth**: `gh auth status` returns a non-expired token. Status script + PR ops fail silently without it.
 - [ ] **Disk**: if Docker / image-build / deploy-ops work is in scope, `df -h` shows >20 GB free on `/` and on the Docker volume. Docker pulls + image builds eat disk fast — overnight loops have run laptops out of space.
 - [ ] **No active debugger**: if any locally-running services are about to be touched, no IDE-attached debugger with active breakpoints on those services. The loop will not pause on a breakpoint — it will hang or skip. (If the project's `CLAUDE.md` has a local-services section, consult it for the detection recipe.)
+- [ ] **Scope-depth path chosen and recorded** (per step 2.5): a deliberate Path A (full upfront), Path B (partial + deferred-on-the-fly with conditions met), Path C (pushed-back DoD), or a blend — documented in the brief's `## Notes for future-you`. The bad outcome is *accidental* improvisation; deliberate deferral with conditions met is fine, and pushing back a narrower DoD is fine. The audit fails only when the agent is about to launch with under-specified phases that weren't named as a deliberate deferral.
 - [ ] **No mid-flight branches**: parent repo + affected submodules are on `main` with a clean working tree (or the user has explicitly told you to continue on a feature branch). Session-start drift is a known foot-gun for pointer-bump operations.
 - [ ] **Tunnel / VPN if needed**: if the loop's tasks reach a remote environment via a Cloudflare tunnel, VPN, or SSH tunnel, confirm it's up before handing off. It will not auto-recover overnight.
 - [ ] **Harness at the user's `/loop` firing location**: `.claude/loop.md` exists at `$(git rev-parse --show-toplevel)` of the user's normal cwd, NOT only in a sibling worktree. If unsure, ask the user where they will type `/loop` and confirm the harness is there.

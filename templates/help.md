@@ -8,7 +8,7 @@ You should be at the **execution** end of a deliberate pipeline — the upstream
 
 - ✓ Design document (multi-round design, e.g. via `brainstorming`) — committed
 - ✓ Architecture review settled (e.g. architecture-critic + `/review`) — "do not re-litigate" recorded
-- ✓ Plan written (e.g. via `writing-plans`) — phased, with dependencies + scope carve-outs
+- ✓ Plan written (e.g. via `writing-plans`) — and a deliberate scope-depth path picked: **(A)** every phase through DoD designed upfront, **(B)** partial upfront + deferred-on-the-fly with conditions met, OR **(C)** a narrower DoD agreed with the user. The bad outcome is accidental whole-phase improvisation mid-loop; deliberate deferral or scope reduction is fine. The skill's setup step 2.5 walks this judgement.
 - ✓ Issues filed (umbrella + children) in your tracker — GitHub / Linear / etc.
 - ✓ Docs committed; issues link to them
 
