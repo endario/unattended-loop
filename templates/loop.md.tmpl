@@ -120,7 +120,13 @@ If you find yourself reaching for an `@Ignore` or `it.skip` annotation in unatte
 
 ### Local-ops greenlight
 
-You have permission to start / stop / restart the project's local services, and to `docker compose up/down/restart` development containers. Before killing a service, self-check via `lsof -nPi tcp:<port> -sTCP:LISTEN -t` + `ps -p <PID> -o command=` so you don't disrupt an IDE-attached process the user left running (debugger state, hot-reload, terminal output). The user is away — you are the user-equivalent for this session; do not ping for local-ops permission.
+You have permission to start / stop / restart the project's local services, and to `docker compose up/down/restart` development containers. The user is away — you are the user-equivalent for this session; do not ping for local-ops permission.
+
+**This greenlight pre-approves `--force` restart of services that a `live-ops`-style classifier flags as IDE-launched** (e.g. `adastra-services.py stop <svc> --force` past the default IDE-protection refusal). Rationale: the setup pre-flight (`No active debugger`) is the user-time gate that already confirmed no real IDE-debug session is in play on services the loop will touch. Once past pre-flight, the IDE-launched warning is either (a) stale (the user's IDE quit but its descendants outlived it) or (b) a classifier false positive (the launcher heuristic mis-fired on a path or argv string). Both are unblockable without the user; pinging on every tick defeats the loop's point. **If the classifier surfaces the matched pattern** (e.g. an `adastra-services.py status` MATCHED column showing what triggered the classification), log it in the progress-log line alongside the kill event — the user reads this on return and can spot "killed something I cared about" vs "killed a stale orphan" at a glance.
+
+Still self-check via `lsof -nPi tcp:<port> -sTCP:LISTEN -t` + `ps -p <PID> -o command=` before killing — that's the audit trail of what was on that port. The pre-approval lifts the **gate**; it doesn't lift the **logging discipline**.
+
+The pre-approval **does not** extend to: production / staging containers, anything outside the project's documented local-services set, or services the brief's `## Off-limits without user input` explicitly carves out.
 
 ### /review judiciously, on meaningful PRs
 
