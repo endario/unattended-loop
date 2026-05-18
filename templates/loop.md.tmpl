@@ -178,6 +178,30 @@ When you hit either threshold:
 2. File an issue with what you attempted, the symptoms, and your current hypothesis. Reference any commits / branches that captured partial work.
 3. **Move to the next independent task in the plan.** Do not loop back to the same subtask later in the same session — leave it for fresh-context Claude on the next session.
 
+### Unpublished upstream dependency — use a local override, don't park
+
+When a task depends on code that's **merged upstream but not yet published as a versioned artifact** (sibling library, sister package, upstream crate, etc.), do **not** park the dependent work waiting for the release. Cutting a release is a user-cadence decision; pinging the user on every such wall is the failure mode this rule prevents — the engineering work *can* proceed, only the final merge has to wait for the release cycle.
+
+Use your build system's **local-dependency override** to point the dependent code at the upstream's working / merged state, finish the engineering work, then revert the override before opening the PR. Common forms:
+
+- **Gradle**: composite build via `includeBuild(...)` in `settings.gradle[.kts]`, or `mavenLocal()` + `./gradlew :<upstream>:publishToMavenLocal`
+- **npm / yarn / pnpm**: `npm link` / `yarn link`, or a workspace path entry
+- **pip**: `pip install -e ../<sibling-package>` or a PEP 660 path entry in `pyproject.toml`
+- **Cargo**: `[patch.crates-io]` block, or `path = "../<crate>"` in the dependent's `Cargo.toml`
+- **Go**: `replace` directive in `go.mod`
+- **Maven**: `mvn install` upstream + bump the dependent's version selector
+- **Other ecosystems**: the equivalent path / link / replace mechanism — every modern build tool has one
+
+This pattern also covers the **upstream-PR-not-yet-merged** case: point the override at the upstream PR's branch / local checkout. The dependent PR is then sequenced behind the upstream PR's merge — same workaround, same revert discipline.
+
+Discipline that goes with the workaround:
+
+1. **The override is a workaround, not a commit.** Never push the path-replaced state to the PR. Revert / unstage before `gh pr create`. Note in the PR description that the upstream version-bump is a separate follow-up (file an issue if none is tracked).
+2. **The dependent PR cannot merge until the upstream is published** — that's still a sequencing constraint, not an engineering blocker. Hold the dependent PR in draft (`gh pr ready --undo <num>`) or open without auto-merge until the upstream artifact lands; then bump the dependent's version reference and finalise.
+3. **Log the override use in the progress log** so the user sees, on return, what's chained to what: `- <ts> — LOCAL DEP OVERRIDE: <dependent> → <upstream> (awaiting publish of <upstream-version>); workaround active on feat/<branch>, not committed.`
+
+What this rule replaces: the default "park the work and ping the user on release cadence" reflex. Release-cadence isn't a scope decision the user needs to make on-the-spot; pinging on every such occurrence wastes ticks the loop could spend shipping the dependent work.
+
 ### PR-first
 
 Every change via branch → PR → squash-merge per `CLAUDE.md` §Workflow: PR-first. Direct-push to main only for the allowlisted cases (release commits, mechanical pointer bumps, emergencies). Auto-merge:
@@ -269,7 +293,7 @@ Use `PushNotification` only when:
 3. A hard infra failure prevents ALL progress (after attempting recovery).
 4. **Stuck-but-busy detection**: you've fired >100 ticks OR run >12 hours **without shipping a single merged PR or issue closure**. Ping once: *"stuck in non-productive loop — please review brief, it may need redirection."* You may continue looping until the user responds, but assume the brief is wrong, not the work.
 
-**Not pings**: normal progress, phase completion, opening a PR, encountering a small bug you can fix. The progress log carries that.
+**Not pings**: normal progress, phase completion, opening a PR, encountering a small bug you can fix. **Also not a ping**: hitting an unpublished-upstream-dependency wall — use a local override per `### Unpublished upstream dependency` and continue; release-cadence is not a scope decision worth waking the user for. The progress log carries all of this.
 
 One ping per state, not per tick.
 
